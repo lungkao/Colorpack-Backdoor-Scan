@@ -32,9 +32,8 @@ No dependencies, no installation. Upload → open URL → scan → delete.
 
 ---
 
-สร้างจากเคส nccthailand.com (โดนแฮก เม.ย. 2025: `eval(php://input)` + Tiny File
-Manager webshell 10 จุดผ่าน `zip://` loader). เอาไปสแกนเว็บอื่น โดยเฉพาะ **shared
-host** ที่มีแค่ FTP/web panel
+สร้างจากเคสจริงที่พบ `eval(php://input)` + Tiny File Manager webshell ผ่าน `zip://` loader
+เหมาะสำหรับ **shared host** ที่มีแค่ FTP/web panel ไม่มี SSH
 
 มี 2 เวอร์ชัน เนื้อหา detection เหมือนกัน:
 
