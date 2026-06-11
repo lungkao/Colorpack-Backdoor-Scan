@@ -123,19 +123,10 @@ document.getElementById('scanForm').addEventListener('submit', function(e) {
  var btn = document.getElementById('startBtn');
  overlay.classList.add('show');
  btn.disabled = true;
- var fd = new FormData(this);
- fetch(this.action, {method:'POST', body:fd})
-  .then(function(r){return r.text();})
-  .then(function(html){
-   document.open();
-   document.write(html);
-   document.close();
-  })
-  .catch(function(){
-   overlay.classList.remove('show');
-   btn.disabled = false;
-   alert('เกิดข้อผิดพลาด กรุณาลองใหม่');
-  });
+ var form = this;
+ requestAnimationFrame(function(){
+  requestAnimationFrame(function(){ form.submit(); });
+ });
 });
 </script>
 <footer style="margin-top:3rem;padding-top:1rem;border-top:1px solid #eee;color:#bbb;font-size:.78rem">
