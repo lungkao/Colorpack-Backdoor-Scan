@@ -1,0 +1,16 @@
+# Quarantine folders (contain potentially malicious files)
+_QUARANTINE_*/
+_backdoor_scan_backups/
+
+# Binary archives
+*.zip
+
+# Site-specific incident reports (sensitive)
+SECURITY-INCIDENT-REPORT-*.md
+
+# Local files
+.DS_Store
+SECURITY-INCIDENT-REPORT.md
+smtp-test.php
+scan-backdoor.sh
+scan-backdoor.php
