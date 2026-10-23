@@ -1,4 +1,4 @@
-# Colorpack Backdoor Scan V2.0
+# Colorpack Backdoor Scan V2.0.1
 
 **[EN]** Single-file PHP backdoor scanner + incident-response console for Joomla and general PHP websites.
 No dependencies, no installation: upload → sign in → scan → review → clean up.
@@ -6,7 +6,7 @@ No dependencies, no installation: upload → sign in → scan → review → cle
 **[TH]** เครื่องมือสแกน backdoor และจัดการไฟล์น่าสงสัยแบบไฟล์เดียว สำหรับเว็บ Joomla และ PHP ทั่วไป
 ไม่ต้องติดตั้ง — อัปโหลด → ล็อกอิน → สแกน → ตรวจสอบ → ลบ/แก้ไข
 
-**File / ไฟล์:** [`advance-scan-backdoor.php`](advance-scan-backdoor.php) (V2.0, requires PHP 7.0+)
+**File / ไฟล์:** [`advance-scan-backdoor.php`](advance-scan-backdoor.php) (V2.0.1, requires PHP 7.0+)
 
 ---
 
@@ -53,6 +53,12 @@ No dependencies, no installation: upload → sign in → scan → review → cle
 | `$ENABLE_WRITE` | `false` = scan and view code only (no delete / edit) |
 
 ---
+
+## What's new in 2.0.1
+
+- **Fixes `504 Gateway Time-out` (nginx) on large sites:** cache/tmp statistics are time-boxed, the silent pre-count pass is gone,
+  the scan sends keep-alive output, cache clearing runs in resumable rounds, and a scan that a proxy cuts off still finishes and
+  is cached — open `?view=last` to see the result. On very large sites also raise `fastcgi_read_timeout` / `request_terminate_timeout`.
 
 ## What's new in 2.0
 

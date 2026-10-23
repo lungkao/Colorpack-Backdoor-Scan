@@ -26,13 +26,17 @@
  *   - UI: new light theme, risk score, one row per file, global search, code viewer/editor popup with
  *     suspicious-line highlighting, results survive Back/refresh (auto-rescan when files change).
  *
- * @version 2.0.0
+ * 2.0.1: fixes 504 Gateway Time-out behind nginx (time-boxed cache stats, no silent pre-count pass,
+ *         keep-alive output while scanning, resumable cache clearing, scan finishes + caches even if
+ *         the proxy drops the connection - open ?view=last).
+ *
+ * @version 2.0.1
  */
 
 // ---------------------------------------------------------------------------
 // CONFIG
 // ---------------------------------------------------------------------------
-$VERSION      = '2.0.0';
+$VERSION      = '2.0.1';
 $PASSWORD     = 'CHANGE_ME_to_a_long_random_string';   // required for web access — set a unique long random value per site
 $ALLOW_IPS     = [];                  // e.g. ['203.0.113.5'] — empty = any IP
 $REQUIRE_HTTPS = true;                // refuse plain HTTP (set false only for local testing)
@@ -225,14 +229,15 @@ function scanCacheSave($d) {
     @chmod(scanCacheFile(), 0600);
 }
 /** Files (scan-relevant extensions) added/changed/moved in after $since — catches stale cached results. */
-function changedSince($ROOT, $since, $EXT, $SKIP_DIRS, $limit = 20) {
-    $out = [];
+function changedSince($ROOT, $since, $EXT, $SKIP_DIRS, $limit = 20, $budget = 8.0) {
+    $out = []; $t0 = microtime(true);
     try {
         $it = new RecursiveIteratorIterator(new RecursiveCallbackFilterIterator(
             new RecursiveDirectoryIterator($ROOT, FilesystemIterator::SKIP_DOTS),
             function ($cur) use ($SKIP_DIRS) { return !($cur->isDir() && in_array($cur->getFilename(), $SKIP_DIRS, true)); }
         ), RecursiveIteratorIterator::LEAVES_ONLY);
         foreach ($it as $f) {
+            if (microtime(true) - $t0 > $budget) break;   // never stall the page; a later scan will catch the rest
             if (!$f->isFile()) continue;
             $lc = strtolower($f->getFilename());
             if (!(in_array(strtolower($f->getExtension()), $EXT, true) || $lc === '.htaccess' || $lc === '.user.ini' || $lc === 'index.zip')) continue;
@@ -561,7 +566,7 @@ function allowedPath($ROOT, $rel) {
         if ($act === 'clear_cache') {
             auditLog('clear_cache');
             $cPaths = ['/cache', '/tmp', '/administrator/cache'];
-            $deleted = 0; $errors = 0; $found = [];
+            $deleted = 0; $errors = 0; $found = []; $more = false; $cT0 = microtime(true);
             foreach ($cPaths as $cd) {
                 $dir = $ROOT . $cd;
                 $rd = realpath($dir);
@@ -578,10 +583,11 @@ function allowedPath($ROOT, $rel) {
                         if ($f->isFile() && !$f->isLink() && $f->getFilename() !== 'index.html') {
                             @unlink($f->getPathname()) ? $deleted++ : $errors++;
                         }
+                        if ((($deleted + $errors) & 255) === 0 && microtime(true) - $cT0 > 20) { $more = true; break 2; }   // stay under proxy time-outs; client calls again
                     }
                 } catch (Throwable $e) { $errors++; }
             }
-            echo json_encode(['ok' => true, 'deleted' => $deleted, 'errors' => $errors, 'dirs' => $found]); exit;
+            echo json_encode(['ok' => true, 'deleted' => $deleted, 'errors' => $errors, 'dirs' => $found, 'more' => $more]); exit;
         }
         if (!allowedPath($ROOT, $frel)) {
             auditLog('denied', $act . ' not in scan: ' . $frel);
@@ -646,7 +652,8 @@ function allowedPath($ROOT, $rel) {
         $hLast = $lastScan ? '<a class="btn" style="background:transparent;color:var(--acc);border:1px solid var(--acc);box-shadow:none;margin-left:.6rem;text-decoration:none;display:inline-flex;align-items:center" href="?view=last">ดูผลสแกนล่าสุด · ' . htmlspecialchars(date('d/m/Y H:i', (int)($lastScan['time'] ?? 0)), ENT_QUOTES, 'UTF-8') . '</a>' : '';
         // Pre-compute cache stats
         $cDirList = ['/cache', '/tmp', '/administrator/cache'];
-        $cCount = 0; $cSize = 0; $cFound = [];
+        // Time-boxed (2.5 s): cache/tmp can hold 100k+ files; a slow count here caused 504 gateway time-outs.
+        $cCount = 0; $cSize = 0; $cFound = []; $cCut = false; $cT0 = microtime(true);
         foreach ($cDirList as $cd) {
             $dir = $ROOT . $cd;
             if (!is_dir($dir)) continue;
@@ -659,11 +666,12 @@ function allowedPath($ROOT, $rel) {
                         $cCount++;
                         $cSize += $f->getSize();
                     }
+                    if (($cCount & 255) === 0 && microtime(true) - $cT0 > 2.5) { $cCut = true; break 2; }
                 }
             } catch (Throwable $e) {}
         }
         $hCacheInfo = $cCount > 0
-            ? number_format($cCount) . ' ไฟล์ (' . ($cSize >= 1048576
+            ? ($cCut ? 'มากกว่า ' : '') . number_format($cCount) . ' ไฟล์ (' . ($cSize >= 1048576
                 ? round($cSize / 1048576, 1) . ' MB'
                 : round($cSize / 1024, 1) . ' KB') . ')'
             : '(ไม่พบโฟลเดอร์ cache/tmp)';
@@ -673,7 +681,7 @@ function allowedPath($ROOT, $rel) {
         echo <<<HTML
 <!doctype html><html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Colorpack Advanced Backdoor Scan V2.0</title>
+<title>Colorpack Advanced Backdoor Scan V2.0.1</title>
 <style>
  body{font:15px/1.6 -apple-system,"Segoe UI","Sarabun",Tahoma,sans-serif;margin:0;padding:2rem 1.5rem;max-width:600px;margin-inline:auto;color:#1a1a1a}
  h1{font-size:1.5rem;margin:0 0 .3rem}
@@ -732,20 +740,24 @@ function clearCache(){
  fd.append('_action','clear_cache');
  fd.append('_path','__cache__');
  fd.append('_token','{$hClearToken}');
- fetch('',{method:'POST',body:fd})
-  .then(function(r){return r.json();})
-  .then(function(d){
-   if(d.ok){
-    document.getElementById('cache-info').textContent='ล้างแล้ว '+d.deleted+' ไฟล์';
+ var total=0;
+ function step(){
+  var f2=new FormData();
+  f2.append('_action','clear_cache');f2.append('_path','__cache__');f2.append('_token','{$hClearToken}');
+  fetch('',{method:'POST',body:f2})
+   .then(function(r){return r.json();})
+   .then(function(d){
+    if(!d.ok){btn.disabled=false;btn.textContent='ล้าง Cache';alert('Error: '+d.err);return;}
+    total+=d.deleted;
+    document.getElementById('cache-info').textContent='ล้างแล้ว '+total.toLocaleString()+' ไฟล์'+(d.more?' ... กำลังล้างต่อ':'');
+    if(d.more){btn.textContent='กำลังล้าง... '+total.toLocaleString();step();return;}
     btn.textContent='✓ ล้างสำเร็จ';
     var s=document.getElementById('cache-section');
     s.style.background='#e6f4ea'; s.style.borderColor='#9bcca9';
-   }else{
-    btn.disabled=false; btn.textContent='ล้าง Cache';
-    alert('Error: '+d.err);
-   }
-  })
-  .catch(function(){btn.disabled=false;btn.textContent='ล้าง Cache';alert('Connection error');});
+   })
+   .catch(function(){btn.disabled=false;btn.textContent='ล้าง Cache';alert('Connection error');});
+ }
+ step();
 }
 </script>
 {$DESIGN_FOOTER}
@@ -756,7 +768,8 @@ HTML;
 
     $isFetch    = !empty($_POST['_fetch']);
     $hProgStyle = $isFetch ? ' style="display:none"' : '';
-    @set_time_limit(300);
+    @set_time_limit(900);
+    ignore_user_abort(true);   // finish + cache the scan even if the proxy cuts the connection (open ?view=last afterwards)
 
     // STREAMING SETUP — flush output as scan progresses
     if (function_exists('apache_setenv')) @apache_setenv('no-gzip', '1');
@@ -774,7 +787,7 @@ HTML;
     echo <<<HTML
 <!doctype html><html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Colorpack Advanced Backdoor Scan V2.0</title>
+<title>Colorpack Advanced Backdoor Scan V2.0.1</title>
 <style>
  body{font:15px/1.6 -apple-system,"Segoe UI","Noto Sans Thai","Noto Sans",Tahoma,sans-serif;margin:0;padding:1.5rem;max-width:1000px;margin-inline:auto;color:#1a1a1a}
  h1{font-size:1.5rem;margin:0 0 .3rem}
@@ -908,11 +921,16 @@ HTML;
 </style>{$DESIGN_JS}
 <script>
 function updateProg(n,total){
- var pct=total>0?Math.round(n/total*100):0;
  var lbl=document.getElementById('prog-label');
  lbl.className='';
- lbl.textContent='กำลังสแกน... '+n.toLocaleString('th')+' / '+total.toLocaleString('th')+' ไฟล์ ('+pct+'%)';
- var pb=document.getElementById('prog-bar');pb.style.animation='none';pb.style.left='0';pb.style.width=pct+'%';
+ var pb=document.getElementById('prog-bar');
+ if(total>0){
+  var pct=Math.min(99,Math.round(n/total*100));
+  lbl.textContent='กำลังสแกน... '+n.toLocaleString('th')+' / ~'+total.toLocaleString('th')+' ไฟล์ ('+pct+'%)';
+  pb.style.animation='none';pb.style.left='0';pb.style.width=pct+'%';
+ }else{
+  lbl.textContent='กำลังสแกน... '+n.toLocaleString('th')+' ไฟล์';
+ }
 }
 function doneProg(n,t){
  var pb=document.getElementById('prog-bar');pb.style.animation='none';pb.style.left='0';pb.style.width='100%';
@@ -1662,21 +1680,9 @@ if (!empty($viewLast)) {
     $findings = $lastScan['findings']; $scanned = (int)($lastScan['scanned'] ?? 0);
 } else {
 if (!$IS_CLI) {
-    try {
-        foreach ($makeIt() as $file) {
-            if (!$file->isFile()) continue;
-            $lc  = strtolower($file->getFilename());
-            $ext = strtolower($file->getExtension());
-            if ($lc === 'index.zip'
-                || preg_match('~^adman\.\d+\.txt$~i', $lc)
-                || in_array($ext, $EXT, true)
-                || $lc === '.htaccess' || $lc === '.user.ini') {
-                $totalFiles++;
-            }
-        }
-    } catch (Throwable $e) {
-        out_fatal("Cannot read root: $ROOT — " . $e->getMessage());
-    }
+    // No silent pre-count pass (it doubled the walk and sent nothing for minutes -> 504 behind nginx).
+    // Progress uses the previous scan's file count as an estimate; 0 = indeterminate bar.
+    $totalFiles = (int)($lastScan['scanned'] ?? 0);
     echo '<script>updateProg(0,' . $totalFiles . ');</script>';
     flush();
 }
@@ -1696,8 +1702,11 @@ try {
     out_fatal("Cannot read root: $ROOT — " . $e->getMessage());
 }
 
+$lastPing = microtime(true);
 foreach ($it as $file) {
     if (!$file->isFile()) continue;
+    // keep-alive: send a byte every few seconds so proxies (nginx fastcgi_read_timeout) never see a silent connection
+    if (!$IS_CLI && microtime(true) - $lastPing > 3) { echo '<script>updateProg(' . $scanned . ',' . $totalFiles . ');</script>'; flush(); $lastPing = microtime(true); }
     $path = $file->getPathname();
     if (realpath($path) === $selfReal) continue;   // never flag ourselves
     $lc   = strtolower($file->getFilename());
