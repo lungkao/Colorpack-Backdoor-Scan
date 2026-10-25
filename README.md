@@ -7,6 +7,8 @@
 
 # Colorpack Backdoor Scan V2.0.1
 
+<a href="https://buymeacoffee.com/cheuachatchai" >![buy_me_a_coffee](https://github.com/conseilgouz/plg_system_cgwebp_j4/assets/19435246/4fda4cb5-64f1-4717-81ae-c71a0fc26c2d)</a>
+
 **[EN]** Single-file PHP backdoor scanner + incident-response console for Joomla and general PHP websites.
 No dependencies, no installation: upload → sign in → scan → review → clean up.
 
@@ -123,3 +125,11 @@ known webshell signatures, PHP in upload directories, double extensions, cloakin
 ## Credits
 
 © 2026 บริษัท คัลเลอร์แพค ครีเอชั่น จำกัด (Colorpack Creation Co., Ltd.) · [colorpack.co.th](https://colorpack.co.th/)
+
+---
+
+## สนับสนุนผู้พัฒนา / Support the author
+
+ถ้าเครื่องมือนี้ช่วยคุณได้ เลี้ยงกาแฟผู้พัฒนาได้ที่นี่ · If this tool helped you, you can buy the author a coffee:
+
+<a href="https://buymeacoffee.com/cheuachatchai" >![buy_me_a_coffee](https://github.com/conseilgouz/plg_system_cgwebp_j4/assets/19435246/4fda4cb5-64f1-4717-81ae-c71a0fc26c2d)</a>
