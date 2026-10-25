@@ -30,13 +30,17 @@
  *         keep-alive output while scanning, resumable cache clearing, scan finishes + caches even if
  *         the proxy drops the connection - open ?view=last).
  *
- * @version 2.0.1
+ * 2.0.2: the scan no longer runs in ONE long request. The browser drives it in short (~12 s) rounds
+ *         (scan_start / scan_step, resumable, state in the protected folder), so no proxy time-out
+ *         (nginx 504, Apache, host firewalls) can interrupt it however large the site is.
+ *
+ * @version 2.0.2
  */
 
 // ---------------------------------------------------------------------------
 // CONFIG
 // ---------------------------------------------------------------------------
-$VERSION      = '2.0.1';
+$VERSION      = '2.0.2';
 $PASSWORD     = 'CHANGE_ME_to_a_long_random_string';   // required for web access — set a unique long random value per site
 $ALLOW_IPS     = [];                  // e.g. ['203.0.113.5'] — empty = any IP
 $REQUIRE_HTTPS = true;                // refuse plain HTTP (set false only for local testing)
@@ -263,7 +267,9 @@ function changedSince($ROOT, $since, $EXT, $SKIP_DIRS, $limit = 20, $budget = 8.
             $lc = strtolower($f->getFilename());
             if (!(in_array(strtolower($f->getExtension()), $EXT, true) || $lc === '.htaccess' || $lc === '.user.ini' || $lc === 'index.zip')) continue;
             // ctime also changes on mv / unzip, which keep the old mtime
-            if (max($f->getMTime(), $f->getCTime()) >= $since) {
+            $rel = substr($f->getPathname(), strlen($ROOT));
+            if (preg_match('~^/(administrator/)?(cache|tmp|logs)/~i', $rel)) continue;   // volatile dirs change constantly: never trigger a rescan
+            if (max($f->getMTime(), $f->getCTime()) > $since) {
                 $out[] = substr($f->getPathname(), strlen($ROOT));
                 if (count($out) >= $limit) break;
             }
@@ -540,6 +546,95 @@ function allowedPath($ROOT, $rel) {
         );
     }
 
+    // CHUNKED SCAN — scan_start / scan_step. The browser calls scan_step repeatedly; each call works for
+    // ~12 s and returns, so no single request can hit a proxy time-out (nginx 504) however big the site is.
+    if (!empty($_POST['_action']) && in_array($_POST['_action'], ['scan_start', 'scan_step'], true)) {
+        header('Content-Type: application/json; charset=utf-8');
+        @set_time_limit(120); ignore_user_abort(true); @ini_set('memory_limit', '512M');
+        $gr    = guardRoot($ROOT);
+        $jobF  = $gr . '/scan_job.json.php';
+        $listF = $gr . '/scan_files.txt.php';
+        $hdr   = '<?php http_response_code(404); exit; ?>' . "\n";
+        $saveJob = function ($j) use ($jobF, $hdr) { @file_put_contents($jobF, $hdr . json_encode($j, JSON_UNESCAPED_UNICODE), LOCK_EX); @chmod($jobF, 0600); };
+        $stateOf = function ($j, $extra = []) {
+            return array_merge(['ok' => true, 'id' => $j['id'], 'seq' => $j['seq'], 'phase' => $j['phase'], 'listed' => $j['listed'],
+                'scanned' => $j['scanned'], 'found' => count($j['findings']), 'done' => $j['phase'] === 'done'], $extra);
+        };
+        if ($_POST['_action'] === 'scan_start') {
+            $job = ['id' => bin2hex(random_bytes(6)), 'seq' => 0, 'phase' => 'list', 'dirs' => [''], 'listed' => 0,
+                    'offset' => strlen($hdr), 'scanned' => 0, 'findings' => [], 'started' => time()];
+            @file_put_contents($listF, $hdr, LOCK_EX); @chmod($listF, 0600);
+            $saveJob($job);
+            auditLog('scan_start');
+            echo json_encode($stateOf($job)); exit;
+        }
+        // scan_step
+        $raw = @file_get_contents($jobF);
+        $job = $raw !== false ? json_decode(substr($raw, (int) strpos($raw, "\n") + 1), true) : null;
+        if (!is_array($job) || (string)($_POST['_id'] ?? '') !== $job['id']) { echo json_encode(['ok' => false, 'err' => 'ไม่พบงานสแกน — เริ่มใหม่']); exit; }
+        if ($job['phase'] === 'done') { echo json_encode($stateOf($job)); exit; }
+        if ((int)($_POST['_seq'] ?? -1) !== $job['seq']) { echo json_encode($stateOf($job, ['stale' => true])); exit; }   // retry of a step that already ran
+        $lock = fopen($gr . '/scan.lock', 'c');
+        if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) { echo json_encode($stateOf($job, ['busy' => true])); exit; }   // previous step still running
+        $t0 = microtime(true); $budget = 12.0;
+        $imgExt = ['jpg','jpeg','gif','png','ico','bmp','svg','webp'];
+
+        if ($job['phase'] === 'list') {            // phase 1: walk directories, write the relevant file paths to a list
+            $fh = fopen($listF, 'ab');
+            while ($job['dirs'] && microtime(true) - $t0 < $budget) {
+                $rel = array_pop($job['dirs']);
+                $dir = $ROOT . $rel;
+                $dh  = @opendir($dir);
+                if (!$dh) continue;
+                while (($nm = readdir($dh)) !== false) {
+                    if ($nm === '.' || $nm === '..') continue;
+                    $pp = $dir . '/' . $nm; $rr = $rel . '/' . $nm;
+                    if (is_dir($pp)) {
+                        if (!is_link($pp) && !in_array($nm, $SKIP_DIRS, true)) $job['dirs'][] = $rr;
+                        continue;
+                    }
+                    $lcn = strtolower($nm); $ex = strtolower(pathinfo($nm, PATHINFO_EXTENSION));
+                    if ($lcn === 'index.zip' || preg_match('~^adman\.\d+\.txt$~i', $lcn) || $lcn === '.htaccess' || $lcn === '.user.ini'
+                        || in_array($ex, $EXT, true) || in_array($ex, $imgExt, true)) {
+                        fwrite($fh, $rr . "\n"); $job['listed']++;
+                    }
+                }
+                closedir($dh);
+            }
+            fclose($fh);
+            if (!$job['dirs']) $job['phase'] = 'scan';
+        }
+        if ($job['phase'] === 'scan' && microtime(true) - $t0 < $budget) {   // phase 2: inspect files from the list
+            $fh = fopen($listF, 'rb'); fseek($fh, $job['offset']);
+            $eof = false;
+            while (microtime(true) - $t0 < $budget) {
+                $line = fgets($fh);
+                if ($line === false) { $eof = true; break; }
+                $job['offset'] = ftell($fh);
+                $pp = $ROOT . rtrim($line, "\r\n");
+                if (!is_file($pp)) continue;
+                if (bd_scan_file($pp, $job['findings'])) $job['scanned']++;
+            }
+            fclose($fh);
+            if ($eof) {
+                $job['phase'] = 'done';
+                $elapsed = max(0, time() - $job['started']);
+                $allow = []; foreach ($job['findings'] as $f) $allow[$f[2]] = 1;
+                scanCacheSave(['time' => time(), 'scanned' => $job['scanned'], 'elapsed' => $elapsed, 'findings' => $job['findings']]);
+                if ($ENABLE_WRITE) {
+                    @file_put_contents($gr . '/allow.json.php', '<?php http_response_code(404); exit; ?>' . "\n" . json_encode($allow), LOCK_EX);
+                    @chmod($gr . '/allow.json.php', 0600);
+                }
+                @unlink($listF);
+                auditLog('scan', $job['scanned'] . ' files, ' . count($job['findings']) . ' raw findings, ' . $elapsed . 's (chunked)');
+            }
+        }
+        $job['seq']++;
+        $saveJob($job);
+        flock($lock, LOCK_UN); fclose($lock);
+        echo json_encode($stateOf($job)); exit;
+    }
+
     // WRITE ACTIONS — delete_file / get_file / save_file
     if ($ENABLE_WRITE && !empty($_POST['_action'])) {
         header('Content-Type: application/json; charset=utf-8');
@@ -665,11 +760,17 @@ function allowedPath($ROOT, $rel) {
     $lastScanId = $lastScan['time'] ?? 0;
     $viewLast = isset($_GET['view']) && $_GET['view'] === 'last' && $lastScan;
     $staleFiles = [];
-    if ($viewLast) {
+    if ($viewLast && !isset($_GET['fresh'])) {
         $staleFiles = changedSince($ROOT, (int)($lastScan['time'] ?? 0), $EXT, $SKIP_DIRS);
-        if ($staleFiles) { $viewLast = false; $_POST['scan'] = '1'; auditLog('rescan_auto', count($staleFiles) . ' new/changed files since last scan'); }
+        if ($staleFiles) {
+            auditLog('rescan_auto', count($staleFiles) . ' new/changed files since last scan');
+            header('Location: ?autostart=1&n=' . count($staleFiles) . '&ex=' . rawurlencode((string)$staleFiles[0])); exit;
+        }
     }
     if (empty($_POST['scan']) && empty($_GET['scan']) && !$viewLast) {
+        $hAuto = (isset($_GET['autostart']) && isset($_GET['n']))
+            ? '<div class="warn"><strong>สแกนใหม่อัตโนมัติ:</strong> พบไฟล์ใหม่/ที่เปลี่ยนแปลงหลังการสแกนครั้งก่อน ' . (int)$_GET['n'] . ' ไฟล์ (เช่น <code>' . htmlspecialchars((string)($_GET['ex'] ?? ''), ENT_QUOTES, 'UTF-8') . '</code>)</div>'
+            : '';
         $hLast = $lastScan ? '<a class="btn" style="background:transparent;color:var(--acc);border:1px solid var(--acc);box-shadow:none;margin-left:.6rem;text-decoration:none;display:inline-flex;align-items:center" href="?view=last">ดูผลสแกนล่าสุด · ' . htmlspecialchars(date('d/m/Y H:i', (int)($lastScan['time'] ?? 0)), ENT_QUOTES, 'UTF-8') . '</a>' : '';
         // Pre-compute cache stats
         $cDirList = ['/cache', '/tmp', '/administrator/cache'];
@@ -702,7 +803,7 @@ function allowedPath($ROOT, $rel) {
         echo <<<HTML
 <!doctype html><html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Colorpack Advanced Backdoor Scan V2.0.1</title>
+<title>Colorpack Advanced Backdoor Scan V2.0.2</title>
 <style>
  body{font:15px/1.6 -apple-system,"Segoe UI","Sarabun",Tahoma,sans-serif;margin:0;padding:2rem 1.5rem;max-width:600px;margin-inline:auto;color:#1a1a1a}
  h1{font-size:1.5rem;margin:0 0 .3rem}
@@ -726,9 +827,10 @@ function allowedPath($ROOT, $rel) {
  <div class="sp"><a href="?audit=1">ประวัติ</a><a class="out" href="?logout=1">ออกจากระบบ</a></div></div>
 <div id="overlay">
  <div class="spinner"></div>
- <div class="spin-msg">กำลังสแกน กรุณารอ...<br><small style="color:#aaa">อาจใช้เวลา 10–60 วินาที</small></div>
+ <div class="spin-msg"><span id="spin-title">กำลังสแกน กรุณารอ...</span><br><small id="spin-stat" style="color:#999">เว็บใหญ่อาจใช้เวลาหลายนาที — ระบบสแกนเป็นรอบ ๆ ไม่ค้าง</small></div>
 </div>
 <h1>สแกนหา backdoor</h1>
+{$hAuto}
 <div class="meta">Root: <code>{$hRoot}</code></div>
 <div class="warn">
  <strong>หมายเหตุ:</strong> scanner นี้ดูเฉพาะไฟล์ — ยังต้องดู database (admin แปลกปลอม), access log, cron job ด้วย<br>
@@ -743,17 +845,40 @@ function allowedPath($ROOT, $rel) {
  <button class="clr-btn" id="clr-btn" onclick="clearCache()">ล้าง Cache</button>
 </div>
 <script>
+function startScan(){
+ var overlay=document.getElementById('overlay'),btn=document.getElementById('startBtn');
+ var title=document.getElementById('spin-title'),stat=document.getElementById('spin-stat');
+ overlay.classList.add('show'); if(btn)btn.disabled=true;
+ var id='',seq=0,fails=0;
+ function post(act){
+  var fd=new FormData();fd.append('_action',act);fd.append('_id',id);fd.append('_seq',seq);
+  return fetch('',{method:'POST',body:fd}).then(function(r){return r.json();});
+ }
+ function fail(msg){title.textContent='สแกนขัดข้อง';stat.textContent=msg+' — ถ้าสแกนยังทำงานอยู่เบื้องหลัง ลองเปิด ?view=last อีกครั้งภายหลัง';if(btn)btn.disabled=false;}
+ function step(){
+  post('scan_step').then(function(d){
+   fails=0;
+   if(!d.ok){fail(d.err||'ผิดพลาด');return;}
+   id=d.id;seq=d.seq;
+   if(d.phase==='list'){title.textContent='กำลังสำรวจไฟล์...';stat.textContent='พบไฟล์ที่ต้องตรวจแล้ว '+d.listed.toLocaleString()+' ไฟล์';}
+   else if(d.phase==='scan'){title.textContent='กำลังตรวจโค้ด...';stat.textContent='ตรวจแล้ว '+d.scanned.toLocaleString()+' / '+d.listed.toLocaleString()+' ไฟล์ · พบสิ่งน่าสงสัย '+d.found.toLocaleString()+' จุด';}
+   if(d.done){title.textContent='สแกนเสร็จ';stat.textContent='กำลังแสดงผล...';location.href='?view=last&fresh=1';return;}
+   setTimeout(step,d.busy?1500:0);
+  }).catch(function(){
+   fails++; if(fails>5){fail('เชื่อมต่อขัดข้อง');return;}
+   stat.textContent='เชื่อมต่อขัดข้อง ลองใหม่ ('+fails+'/5)...'; setTimeout(step,2000*fails);
+  });
+ }
+ post('scan_start').then(function(d){
+  if(!d.ok){fail(d.err||'เริ่มสแกนไม่ได้');return;}
+  id=d.id;seq=d.seq;step();
+ }).catch(function(){fail('เริ่มสแกนไม่ได้');});
+}
 document.getElementById('scanForm').addEventListener('submit', function(e) {
  e.preventDefault();
- var overlay = document.getElementById('overlay');
- var btn = document.getElementById('startBtn');
- overlay.classList.add('show');
- btn.disabled = true;
- var form = this;
- requestAnimationFrame(function(){
-  requestAnimationFrame(function(){ form.submit(); });
- });
+ startScan();
 });
+if(/[?&]autostart=1/.test(location.search)){window.addEventListener('load',function(){startScan();});}
 function clearCache(){
  var btn=document.getElementById('clr-btn');
  btn.disabled=true; btn.textContent='กำลังล้าง...';
@@ -808,7 +933,7 @@ HTML;
     echo <<<HTML
 <!doctype html><html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Colorpack Advanced Backdoor Scan V2.0.1</title>
+<title>Colorpack Advanced Backdoor Scan V2.0.2</title>
 <style>
  body{font:15px/1.6 -apple-system,"Segoe UI","Noto Sans Thai","Noto Sans",Tahoma,sans-serif;margin:0;padding:1.5rem;max-width:1000px;margin-inline:auto;color:#1a1a1a}
  h1{font-size:1.5rem;margin:0 0 .3rem}
@@ -1158,12 +1283,7 @@ function saveFile(){
   .catch(function(){btn.disabled=false;btn.textContent='💾 บันทึก';toast('Connection error','error');});
 }
 /* ── Rescan ── */
-function doRescan(){
- var f=document.createElement('form');
- f.method='POST';f.action=location.href;
- var i=document.createElement('input');i.type='hidden';i.name='scan';i.value='1';
- f.appendChild(i);document.body.appendChild(f);f.submit();
-}
+function doRescan(){ location.href='?autostart=1'; }
 /* ── Filter rows ── */
 function clearFilter(tab){
  var inp=document.getElementById('filter-inp-'+tab);
@@ -1448,6 +1568,151 @@ function fileEntropy($s) {
     return round($e, 2);
 }
 
+/**
+ * Inspect ONE file and append findings. Returns true when the file counted as "scanned" (code file),
+ * false for files that were only checked by name/location. Shared by the CLI, the streaming
+ * fallback and the chunked (resumable) web scan.
+ */
+function bd_scan_file($path, &$findings) {
+    global $ROOT, $EXT, $BAD_MD5, $UPLOAD_DIRS, $MAX_READ;
+    static $rules = null;
+    if ($rules === null) $rules = bd_rules();
+    $counted = false;
+    if (realpath($path) === realpath(__FILE__)) return false;   // never flag ourselves
+    $lc   = strtolower(basename($path));
+    $ext  = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+    $relU = str_replace('\\', '/', str_replace($ROOT, '', $path));
+
+    // Rule: AdmaNi hit-counter file — proves an AdmaNi shell was/is active here.
+    if (preg_match('~^adman\.\d+\.txt$~i', $lc)) {
+        $val = trim(@file_get_contents($path));
+        $findings[] = ['HIGH', 'AdmaNi shell hit-counter file (active shell indicator)', $relU,
+            "value=$val — AdmaNi (Iranian/Turkish) shell toolkit marker"];
+        return $counted;
+    }
+
+    // Rule: stray index.zip = zip:// loader payload.
+    if ($ext === 'zip' && $lc === 'index.zip') {
+        $md5 = @md5_file($path);
+        $why = isset($BAD_MD5[$md5]) ? $BAD_MD5[$md5] : 'index.zip beside index.php = zip:// loader payload';
+        $findings[] = ['CRITICAL', 'Suspicious index.zip payload', $relU, "md5=$md5 — $why"];
+        return $counted;
+    }
+
+    // Rule: .htaccess outside webroot — Joomla only needs one in root.
+    if ($lc === '.htaccess' && $relU !== '/.htaccess') {
+        $findings[] = ['HIGH', '.htaccess in subdirectory (Joomla: root only)', $relU,
+            'Joomla normally has .htaccess only in root — subdirectory .htaccess can redirect, block security, or serve malicious content'];
+    }
+
+    // Rule: double PHP extension (.php.jpg, .php.gif) — Apache/nginx misconfiguration exploit.
+    if (preg_match('~\.php\d?\.(jpg|jpeg|gif|png|ico|bmp|svg|txt|html|htm)$~i', $lc)) {
+        $findings[] = ['HIGH', 'double extension (PHP evasion technique)', $relU,
+            'hides PHP behind .' . strtoupper($ext) . ' — exploits server extension-handling misconfiguration'];
+    }
+
+    // Rule: another copy of this scanner left on the server (leaked tool / forgotten upload).
+    if (preg_match('~(scan-backdoor|advance-scan)[^/]*\.php$~i', $lc) && realpath($path) !== realpath(__FILE__)) {
+        $findings[] = ['HIGH', 'Scanner copy left on server — delete it (the tool is public; its password may be known)', $relU, ''];
+    }
+
+    // Rule: well-known webshell / file-manager file names.
+    if (preg_match('~^(file-?manager|filemanager\d*|filesman|fm|shell|wso\d*|c99\d*|r57|b374k|alfa|uploader?|up|cmd|mini|xl|tinyfilemanager|wp-?filemanager|wp-?file-?manager)\.(php\d?|phtml|pht)$~i', $lc)
+        // skip genuine CMS-extension parts (guarded by _JEXEC / ABSPATH and living in MVC folders)
+        && !(preg_match('~/(controllers?|models?|views?|helpers?|tables|classes|src|libraries|vendor|admin|site)/~i', $relU)
+             && preg_match('~_JEXEC|\bABSPATH\b|defined\s*\(\s*[\'"]WPINC~', $content))) {
+        $findings[] = ['HIGH', 'file name typical of a web shell / file manager', $relU, 'verify this is a file you installed'];
+    }
+    if (preg_match('~^(adminer(-[\d.]+)?|phpmyadmin|pma|dbadmin)\.php$~i', $lc)) {
+        $findings[] = ['MEDIUM', 'database admin tool in webroot (remove after use / restrict by IP)', $relU, ''];
+    }
+
+    // Rule: hash/hex-named PHP file (random dropper names, e.g. eb290968a00d.php, 35defc640dindex.php).
+    if (in_array($ext, ['php','phtml','pht','php5','php7'], true)
+        && preg_match('~^[a-f0-9]{8,32}(index)?\.[a-z0-9]+$~', $lc)
+        && !preg_match('~-cache-~', $lc)) {
+        $findings[] = ['MEDIUM', 'random hex-named PHP file (typical dropper name)', $relU, ''];
+    }
+
+    // Rule: WordPress-style paths — PHP in uploads, unexpected mu-plugins, wp-* look-alikes on non-WP sites.
+    if (preg_match('~^/wp-content/uploads/.*\.(php\d?|phtml|pht)$~i', $relU)) {
+        $findings[] = ['CRITICAL', 'PHP file inside WordPress uploads (should never execute here)', $relU, ''];
+    }
+    if (preg_match('~^/wp-content/mu-plugins/[^/]+\.php$~i', $relU)) {
+        $findings[] = ['MEDIUM', 'WordPress mu-plugin (auto-loaded, common persistence spot) — verify it is yours', $relU, ''];
+    }
+    if (!is_file($ROOT . '/wp-config.php') && preg_match('~^/(wp-[a-z0-9_-]+\.php|wp-content/|wp-includes/)~i', $relU)) {
+        $findings[] = ['HIGH', 'WordPress-looking file on a non-WordPress site (look-alike shell)', $relU, ''];
+    }
+
+    // Rule: PHP opening tag inside image/media file (polyglot shell).
+    if (in_array($ext, ['jpg','jpeg','gif','png','ico','bmp','svg','webp'], true)) {
+        $head = @file_get_contents($path, false, null, 0, 1024);
+        if ($head !== false && preg_match('~<\?(php|=)~i', $head)) {
+            $findings[] = ['CRITICAL', 'PHP code embedded in image file (polyglot shell)', $relU,
+                'PHP opening tag found inside .' . strtoupper($ext) . ' — classic upload bypass technique'];
+        }
+        return $counted;   // don't run PHP content rules on image files
+    }
+
+    $isCode = in_array($ext, $EXT, true) || $lc === '.htaccess' || $lc === '.user.ini';
+    if (!$isCode) return $counted;
+
+    $counted = true;
+
+    $content = @file_get_contents($path, false, null, 0, $MAX_READ);
+    if ($content === false) return $counted;
+
+    $GLOBALS['RX_ERR'] = false;
+    $fsize = @filesize($path);
+
+    // Exact known-bad hash.
+    $md5 = md5($content);
+    if (isset($BAD_MD5[$md5])) {
+        $findings[] = ['CRITICAL', 'Known backdoor (exact MD5 match)', $relU, $BAD_MD5[$md5] . " — md5=$md5"];
+        return $counted;
+    }
+
+    // Skip the LOCATION rule for framework-generated cache files
+    // (Joomla / RSFirewall: "<md5>-cache-<name>-<md5>.php"). Content rules below
+    // still run on them, so a webshell hiding under a cache-like name is caught.
+    $isCacheFile = (bool) preg_match('~-cache-.*\.php$~i', $relU)
+                && (bool) preg_match('~[a-f0-9]{32}~i', $relU);
+
+    // PHP file sitting in a TOP-LEVEL upload/asset dir = suspicious by location.
+    // Anchor to webroot ($relU starts with the dir) so component trees that
+    // merely contain "cache"/"media" in their name (e.g. com_cache) don't match.
+    if (!$isCacheFile && in_array($ext, ['php','phtml','php3','php4','php5','pht'], true)) {
+        foreach ($UPLOAD_DIRS as $d) {
+            if (strpos($relU, $d) === 0) {
+                $isStub = (strlen($content) <= 60 && rx($content, '~_JEXEC|no direct access~i'));
+                if (!$isStub) {
+                    $findings[] = ['HIGH', 'PHP file in upload/asset directory', $relU, 'unexpected executable in data dir'];
+                }
+                break;
+            }
+        }
+    }
+
+    // Payload appended after >512KB of padding: also scan the last 64KB.
+    if ($fsize !== false && $fsize > $MAX_READ) {
+        $tail = @file_get_contents($path, false, null, max($MAX_READ, $fsize - 65536), 65536);
+        if ($tail !== false) { $content .= "\n" . $tail; }
+        $findings[] = ['MEDIUM', 'Oversized code file (>512KB) — head+tail scanned only', $relU, round($fsize / 1024) . ' KB'];
+    }
+
+    // Pattern rules.
+    foreach ($rules as [$sev, $label, $cb]) {
+        if ($cb($content)) {
+            $findings[] = [$sev, $label, $relU, ''];
+        }
+    }
+    if (!empty($GLOBALS['RX_ERR'])) {
+        $findings[] = ['MEDIUM', 'Scan incomplete (regex limit hit) — review manually', $relU, preg_last_error_msg()];
+    }
+    return $counted;
+}
+
 function bd_rules() {
     return [
     // --- CRITICAL: near-certain backdoor signatures ---
@@ -1728,144 +1993,13 @@ foreach ($it as $file) {
     if (!$file->isFile()) continue;
     // keep-alive: send a byte every few seconds so proxies (nginx fastcgi_read_timeout) never see a silent connection
     if (!$IS_CLI && microtime(true) - $lastPing > 3) { echo '<script>updateProg(' . $scanned . ',' . $totalFiles . ');</script>'; flush(); $lastPing = microtime(true); }
-    $path = $file->getPathname();
-    if (realpath($path) === $selfReal) continue;   // never flag ourselves
-    $lc   = strtolower($file->getFilename());
-    $ext  = strtolower($file->getExtension());
-    $relU = str_replace('\\', '/', str_replace($ROOT, '', $path));
-
-    // Rule: AdmaNi hit-counter file — proves an AdmaNi shell was/is active here.
-    if (preg_match('~^adman\.\d+\.txt$~i', $lc)) {
-        $val = trim(@file_get_contents($path));
-        $findings[] = ['HIGH', 'AdmaNi shell hit-counter file (active shell indicator)', $relU,
-            "value=$val — AdmaNi (Iranian/Turkish) shell toolkit marker"];
-        continue;
-    }
-
-    // Rule: stray index.zip = zip:// loader payload.
-    if ($ext === 'zip' && $lc === 'index.zip') {
-        $md5 = @md5_file($path);
-        $why = isset($BAD_MD5[$md5]) ? $BAD_MD5[$md5] : 'index.zip beside index.php = zip:// loader payload';
-        $findings[] = ['CRITICAL', 'Suspicious index.zip payload', $relU, "md5=$md5 — $why"];
-        continue;
-    }
-
-    // Rule: .htaccess outside webroot — Joomla only needs one in root.
-    if ($lc === '.htaccess' && $relU !== '/.htaccess') {
-        $findings[] = ['HIGH', '.htaccess in subdirectory (Joomla: root only)', $relU,
-            'Joomla normally has .htaccess only in root — subdirectory .htaccess can redirect, block security, or serve malicious content'];
-    }
-
-    // Rule: double PHP extension (.php.jpg, .php.gif) — Apache/nginx misconfiguration exploit.
-    if (preg_match('~\.php\d?\.(jpg|jpeg|gif|png|ico|bmp|svg|txt|html|htm)$~i', $lc)) {
-        $findings[] = ['HIGH', 'double extension (PHP evasion technique)', $relU,
-            'hides PHP behind .' . strtoupper($ext) . ' — exploits server extension-handling misconfiguration'];
-    }
-
-    // Rule: another copy of this scanner left on the server (leaked tool / forgotten upload).
-    if (preg_match('~(scan-backdoor|advance-scan)[^/]*\.php$~i', $lc) && realpath($path) !== realpath(__FILE__)) {
-        $findings[] = ['HIGH', 'Scanner copy left on server — delete it (the tool is public; its password may be known)', $relU, ''];
-    }
-
-    // Rule: well-known webshell / file-manager file names.
-    if (preg_match('~^(file-?manager|filemanager\d*|filesman|fm|shell|wso\d*|c99\d*|r57|b374k|alfa|uploader?|up|cmd|mini|xl|tinyfilemanager|wp-?filemanager|wp-?file-?manager)\.(php\d?|phtml|pht)$~i', $lc)
-        // skip genuine CMS-extension parts (guarded by _JEXEC / ABSPATH and living in MVC folders)
-        && !(preg_match('~/(controllers?|models?|views?|helpers?|tables|classes|src|libraries|vendor|admin|site)/~i', $relU)
-             && preg_match('~_JEXEC|\bABSPATH\b|defined\s*\(\s*[\'"]WPINC~', $content))) {
-        $findings[] = ['HIGH', 'file name typical of a web shell / file manager', $relU, 'verify this is a file you installed'];
-    }
-    if (preg_match('~^(adminer(-[\d.]+)?|phpmyadmin|pma|dbadmin)\.php$~i', $lc)) {
-        $findings[] = ['MEDIUM', 'database admin tool in webroot (remove after use / restrict by IP)', $relU, ''];
-    }
-
-    // Rule: hash/hex-named PHP file (random dropper names, e.g. eb290968a00d.php, 35defc640dindex.php).
-    if (in_array($ext, ['php','phtml','pht','php5','php7'], true)
-        && preg_match('~^[a-f0-9]{8,32}(index)?\.[a-z0-9]+$~', $lc)
-        && !preg_match('~-cache-~', $lc)) {
-        $findings[] = ['MEDIUM', 'random hex-named PHP file (typical dropper name)', $relU, ''];
-    }
-
-    // Rule: WordPress-style paths — PHP in uploads, unexpected mu-plugins, wp-* look-alikes on non-WP sites.
-    if (preg_match('~^/wp-content/uploads/.*\.(php\d?|phtml|pht)$~i', $relU)) {
-        $findings[] = ['CRITICAL', 'PHP file inside WordPress uploads (should never execute here)', $relU, ''];
-    }
-    if (preg_match('~^/wp-content/mu-plugins/[^/]+\.php$~i', $relU)) {
-        $findings[] = ['MEDIUM', 'WordPress mu-plugin (auto-loaded, common persistence spot) — verify it is yours', $relU, ''];
-    }
-    if (!is_file($ROOT . '/wp-config.php') && preg_match('~^/(wp-[a-z0-9_-]+\.php|wp-content/|wp-includes/)~i', $relU)) {
-        $findings[] = ['HIGH', 'WordPress-looking file on a non-WordPress site (look-alike shell)', $relU, ''];
-    }
-
-    // Rule: PHP opening tag inside image/media file (polyglot shell).
-    if (in_array($ext, ['jpg','jpeg','gif','png','ico','bmp','svg','webp'], true)) {
-        $head = @file_get_contents($path, false, null, 0, 1024);
-        if ($head !== false && preg_match('~<\?(php|=)~i', $head)) {
-            $findings[] = ['CRITICAL', 'PHP code embedded in image file (polyglot shell)', $relU,
-                'PHP opening tag found inside .' . strtoupper($ext) . ' — classic upload bypass technique'];
+    if (bd_scan_file($file->getPathname(), $findings)) {
+        $scanned++;
+        // Web (streaming fallback): push progress update every 100 files
+        if (!$IS_CLI && $scanned % 100 === 0) {
+            echo '<script>updateProg(' . $scanned . ',' . $totalFiles . ');</script>';
+            flush();
         }
-        continue;   // don't run PHP content rules on image files
-    }
-
-    $isCode = in_array($ext, $EXT, true) || $lc === '.htaccess' || $lc === '.user.ini';
-    if (!$isCode) continue;
-
-    $scanned++;
-
-    // Web: push progress update every 100 files
-    if (!$IS_CLI && $scanned % 100 === 0) {
-        echo '<script>updateProg(' . $scanned . ',' . $totalFiles . ');</script>';
-        flush();
-    }
-
-    $content = @file_get_contents($path, false, null, 0, $MAX_READ);
-    if ($content === false) continue;
-
-    $GLOBALS['RX_ERR'] = false;
-    $fsize = @filesize($path);
-
-    // Exact known-bad hash.
-    $md5 = md5($content);
-    if (isset($BAD_MD5[$md5])) {
-        $findings[] = ['CRITICAL', 'Known backdoor (exact MD5 match)', $relU, $BAD_MD5[$md5] . " — md5=$md5"];
-        continue;
-    }
-
-    // Skip the LOCATION rule for framework-generated cache files
-    // (Joomla / RSFirewall: "<md5>-cache-<name>-<md5>.php"). Content rules below
-    // still run on them, so a webshell hiding under a cache-like name is caught.
-    $isCacheFile = (bool) preg_match('~-cache-.*\.php$~i', $relU)
-                && (bool) preg_match('~[a-f0-9]{32}~i', $relU);
-
-    // PHP file sitting in a TOP-LEVEL upload/asset dir = suspicious by location.
-    // Anchor to webroot ($relU starts with the dir) so component trees that
-    // merely contain "cache"/"media" in their name (e.g. com_cache) don't match.
-    if (!$isCacheFile && in_array($ext, ['php','phtml','php3','php4','php5','pht'], true)) {
-        foreach ($UPLOAD_DIRS as $d) {
-            if (strpos($relU, $d) === 0) {
-                $isStub = (strlen($content) <= 60 && rx($content, '~_JEXEC|no direct access~i'));
-                if (!$isStub) {
-                    $findings[] = ['HIGH', 'PHP file in upload/asset directory', $relU, 'unexpected executable in data dir'];
-                }
-                break;
-            }
-        }
-    }
-
-    // Payload appended after >512KB of padding: also scan the last 64KB.
-    if ($fsize !== false && $fsize > $MAX_READ) {
-        $tail = @file_get_contents($path, false, null, max($MAX_READ, $fsize - 65536), 65536);
-        if ($tail !== false) { $content .= "\n" . $tail; }
-        $findings[] = ['MEDIUM', 'Oversized code file (>512KB) — head+tail scanned only', $relU, round($fsize / 1024) . ' KB'];
-    }
-
-    // Pattern rules.
-    foreach ($RULES as [$sev, $label, $cb]) {
-        if ($cb($content)) {
-            $findings[] = [$sev, $label, $relU, ''];
-        }
-    }
-    if (!empty($GLOBALS['RX_ERR'])) {
-        $findings[] = ['MEDIUM', 'Scan incomplete (regex limit hit) — review manually', $relU, preg_last_error_msg()];
     }
 }
 
@@ -1918,7 +2052,7 @@ if ($IS_CLI) {
 // Web: signal scan complete, then render results
 auditLog(!empty($viewLast) ? 'view_last' : 'scan', $scanned . ' files, ' . count($findings) . ' findings, CRIT ' . $counts['CRITICAL'] . ' HIGH ' . $counts['HIGH']);
 echo '<script>doneProg(' . $scanned . ',' . $elapsed . ');</script>' . "\n";
-if ($staleFiles) { echo '<div class="warn" style="margin-top:1rem"><strong>สแกนใหม่อัตโนมัติ:</strong> พบไฟล์ใหม่/ที่เปลี่ยนแปลงหลังการสแกนครั้งก่อน ' . count($staleFiles) . (count($staleFiles) >= 20 ? '+' : '') . ' ไฟล์ (เช่น <code>' . htmlspecialchars((string)$staleFiles[0], ENT_QUOTES, 'UTF-8') . '</code>)</div>'; }
+if (false) { echo '<div class="warn" style="margin-top:1rem"><strong>สแกนใหม่อัตโนมัติ:</strong> พบไฟล์ใหม่/ที่เปลี่ยนแปลงหลังการสแกนครั้งก่อน ' . count($staleFiles) . (count($staleFiles) >= 20 ? '+' : '') . ' ไฟล์ (เช่น <code>' . htmlspecialchars((string)$staleFiles[0], ENT_QUOTES, 'UTF-8') . '</code>)</div>'; }
 flush();
 
 // One row per FILE: merge every rule that fired on the same path (highest severity decides the tab).
