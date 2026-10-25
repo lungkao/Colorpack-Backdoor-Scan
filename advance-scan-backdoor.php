@@ -52,6 +52,22 @@ if ($IS_CLI) {
     $ROOT = __DIR__;
 }
 
+/**
+ * Colorpack logo (inline SVG, no external file). "PACK" and "CREATIONS" use currentColor:
+ * wrap it in an element with color:#fff on dark backgrounds, color:#17202A on light ones.
+ */
+function bd_logo() {
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 172" role="img" aria-label="COLORPACK CREATIONS" focusable="false">'
+         . '<style>.cpw{font-family:"Quicksand","Nunito","Varela Round","IBM Plex Sans Thai",system-ui,sans-serif;font-weight:700}'
+         . '.cpt{font-family:"Quicksand","Nunito","IBM Plex Sans Thai",system-ui,sans-serif;font-weight:300}</style>'
+         . '<text class="cpw" x="0" y="92" font-size="112" fill="#2BA7DF" textLength="372" lengthAdjust="spacingAndGlyphs">COLOR</text>'
+         . '<text class="cpw" x="388" y="92" font-size="112" fill="currentColor" opacity="0.92" textLength="292" lengthAdjust="spacingAndGlyphs">PACK</text>'
+         . '<circle cx="272" cy="118" r="11" fill="#3B8FE0"/><circle cx="310" cy="118" r="11" fill="#6CC04A"/>'
+         . '<circle cx="348" cy="118" r="11" fill="#F7941D"/><circle cx="386" cy="118" r="11" fill="#EF2B2B"/>'
+         . '<text class="cpt" x="2" y="164" font-size="32" fill="currentColor" opacity="0.75" textLength="676" lengthAdjust="spacing">CREATIONS</text>'
+         . '</svg>';
+}
+
 function bd_css() {
     return <<<'CSSEOF'
 /* ===== v2.0 theme · © Colorpack Creation Co., Ltd. ===== */
@@ -63,7 +79,12 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible{
 ::selection{background:var(--acc-soft)}
 .topbar{display:flex;flex-wrap:wrap;align-items:center;gap:1rem;margin:0 -2rem 1.8rem;padding:.9rem 2rem;background:#12171D;border-bottom:1px solid #1F2A36;color:#E6EDF3;position:sticky;top:0;z-index:50}
 .topbar .brand{display:flex;align-items:center;gap:.7rem;font-weight:700;font-size:1.05rem;letter-spacing:.4px;line-height:1.2}
-.topbar .brand svg{filter:drop-shadow(0 0 6px rgba(45,226,192,.6));flex:none}
+.topbar .brand .cp-logo svg{height:30px;width:auto;display:block;color:#fff}
+.topbar .brand .sep{width:1px;height:28px;background:#2A3745;flex:none}
+.cp-logo{line-height:0}
+.cp-footer .cp-logo svg{height:36px;width:auto;display:block;color:#17202A}
+.lg .cp-logo svg{height:46px;width:auto;display:block;color:#17202A;margin-bottom:.4rem}
+.au .cp-logo svg{height:36px;width:auto;display:block;color:#17202A;margin-bottom:.6rem}
 .topbar .brand small{display:block;font-size:.62rem;letter-spacing:.16em;color:#8B98A8;font-weight:500}
 .topbar .ver{font-size:.7rem;font-weight:500;padding:.1rem .55rem;border:1px solid #2A3745;border-radius:99px;color:#8B98A8;font-family:Menlo,Consolas,monospace}
 .topbar .root{font-family:Menlo,Consolas,monospace;font-size:.78rem;color:#8B98A8;word-break:break-all}
@@ -152,7 +173,7 @@ details.sv td{border:0!important;padding:.55rem .7rem!important;background:trans
 .rsn-n{margin-top:.25rem;font-size:.72rem;color:var(--mute)}
 .cp-footer{margin-top:3rem;padding:1.6rem 0 1rem;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center;color:var(--mute);font-size:.82rem;line-height:1.7}
 .cp-footer .mark{display:flex;align-items:center;gap:.9rem}
-.cp-footer .logo{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#2DE2C0,#1F5FBF);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.3rem;color:#0A0E13;flex:none}
+/* legacy placeholder logo (unused) */ .cp-footer .logo{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#2DE2C0,#1F5FBF);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.3rem;color:#0A0E13;flex:none}
 .cp-footer .co{color:var(--ink);font-weight:700;font-size:.95rem}
 .cp-footer .co-en{font-size:.68rem;letter-spacing:.14em}
 .cp-footer .cr{margin-left:auto;text-align:right}
@@ -417,7 +438,7 @@ if (!$IS_CLI) {
         header('Content-Type: text/html; charset=utf-8');
         echo '<!doctype html><html lang="th" ><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · Backdoor Scan</title><style>' . bd_css() . '</style>' . bd_js() . '</head>'
            . '<body class="lg"><main>'
-           . '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg>'
+           . '<div class="cp-logo">' . bd_logo() . '</div>'
            . '<h1 style="margin:.8rem 0 .2rem;font-size:1.7rem;letter-spacing:.04em">BACKDOOR SCAN</h1><p class="meta" style="margin:0 0 1.4rem;font-size:.9rem">เข้าสู่ระบบเพื่อสแกนและจัดการไฟล์น่าสงสัย</p>'
            . '<form method="post" class="card">'
            . ($err ? '<p role="alert" class="err">' . $err . '</p>' : '')
@@ -437,7 +458,7 @@ if (!$IS_CLI) {
         header('Content-Type: text/html; charset=utf-8');
         $e = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); };
         echo '<!doctype html><html lang="th" ><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Audit log · Backdoor Scan</title><style>' . bd_css() . '</style>' . bd_js() . '</head><body class="au">'
-           . '<h1>ประวัติการใช้งาน (audit log)</h1><p class="meta"><a href="' . $e(strtok($_SERVER['REQUEST_URI'], '?')) . '">← กลับ</a> · ล่าสุด 300 รายการ · login_fail / login_blocked / denied จำนวนมาก หรือ IP แปลกปลอม = มีคนพยายามเข้า</p>'
+           . '<div class="cp-logo">' . bd_logo() . '</div><h1>ประวัติการใช้งาน (audit log)</h1><p class="meta"><a href="' . $e(strtok($_SERVER['REQUEST_URI'], '?')) . '">← กลับ</a> · ล่าสุด 300 รายการ · login_fail / login_blocked / denied จำนวนมาก หรือ IP แปลกปลอม = มีคนพยายามเข้า</p>'
            . '<div class="tw"><table><tr><th>เวลา (UTC)</th><th>IP</th><th>เหตุการณ์</th><th>รายละเอียด</th><th>User-Agent</th></tr>';
         foreach ($rows as $line) {
             $r = json_decode($line, true); if (!is_array($r)) continue;
@@ -455,10 +476,10 @@ if (!$IS_CLI) {
     $hRoot = htmlspecialchars($ROOT, ENT_QUOTES, 'UTF-8');
     $DESIGN_CSS = bd_css();
     $DESIGN_JS  = bd_js();
-    $DESIGN_FOOTER = '<div class="cp-footer"><div class="mark"><div class="logo">C</div><div><div class="co">บริษัท คัลเลอร์แพค ครีเอชั่น จำกัด</div><div class="co-en">COLORPACK CREATION CO., LTD.</div></div></div>'
+    $DESIGN_FOOTER = '<div class="cp-footer"><div class="mark"><span class="cp-logo">' . bd_logo() . '</span><div><div class="co">บริษัท คัลเลอร์แพค ครีเอชั่น จำกัด</div><div class="co-en">COLORPACK CREATION CO., LTD.</div></div></div>'
         . '<div class="cr"><div>© ' . date('Y') . ' บริษัท คัลเลอร์แพค ครีเอชั่น จำกัด สงวนลิขสิทธิ์</div>'
         . '<div><a href="https://colorpack.co.th/" target="_blank" rel="noopener">colorpack.co.th</a> · Backdoor Scan v' . htmlspecialchars($VERSION, ENT_QUOTES, 'UTF-8') . '</div></div></div>';
-    $DESIGN_LOGO = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#F4B183" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg>';
+    $DESIGN_LOGO = '<span class="cp-logo">' . bd_logo() . '</span><span class="sep"></span>';
 
     // CSRF helpers — HMAC keyed on PASSWORD, valid for current or previous 5-min window
     function csrfToken($action, $path) {
@@ -701,7 +722,7 @@ function allowedPath($ROOT, $rel) {
 {$DESIGN_CSS}
  body{max-width:720px}
 </style>{$DESIGN_JS}</head><body>
-<div class="topbar"><div class="brand">{$DESIGN_LOGO}<div>BACKDOOR SCAN<small>COLORPACK SECURITY</small></div><span class="ver">v{$VERSION}</span></div>
+<div class="topbar"><div class="brand">{$DESIGN_LOGO}<div>BACKDOOR SCAN<small>SECURITY SCANNER</small></div><span class="ver">v{$VERSION}</span></div>
  <div class="sp"><a href="?audit=1">ประวัติ</a><a class="out" href="?logout=1">ออกจากระบบ</a></div></div>
 <div id="overlay">
  <div class="spinner"></div>
@@ -1310,7 +1331,7 @@ document.addEventListener('keydown',function(e){
 });
 </script>
 </head><body>
-<div class="topbar"><div class="brand">{$DESIGN_LOGO}<div>BACKDOOR SCAN<small>COLORPACK SECURITY</small></div><span class="ver">v{$VERSION}</span></div>
+<div class="topbar"><div class="brand">{$DESIGN_LOGO}<div>BACKDOOR SCAN<small>SECURITY SCANNER</small></div><span class="ver">v{$VERSION}</span></div>
  <div class="root">{$hRoot}</div>
  <div class="sp"><button onclick="doRescan()">🔄 สแกนใหม่</button><button onclick="window.print()">ส่งออก PDF</button><a href="?audit=1">ประวัติ</a><a class="out" href="?logout=1">ออกจากระบบ</a></div></div>
 <div id="prog-wrap"{$hProgStyle}>

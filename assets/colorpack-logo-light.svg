@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 172" width="680" height="172" role="img" aria-label="COLORPACK CREATIONS">
+    <style>
+    .w{font-family:"Quicksand","Nunito","Varela Round","IBM Plex Sans Thai",system-ui,sans-serif;font-weight:700}
+    .t{font-family:"Quicksand","Nunito","IBM Plex Sans Thai",system-ui,sans-serif;font-weight:300}
+  </style>
+  <text class="w" x="0" y="92" font-size="112" fill="#2BA7DF" textLength="372" lengthAdjust="spacingAndGlyphs">COLOR</text>
+  <text class="w" x="388" y="92" font-size="112" fill="#17202A" opacity="0.92" textLength="292" lengthAdjust="spacingAndGlyphs">PACK</text>
+  <circle cx="272" cy="118" r="11" fill="#3B8FE0"/>
+  <circle cx="310" cy="118" r="11" fill="#6CC04A"/>
+  <circle cx="348" cy="118" r="11" fill="#F7941D"/>
+  <circle cx="386" cy="118" r="11" fill="#EF2B2B"/>
+  <text class="t" x="2" y="164" font-size="32" fill="#17202A" opacity="0.75" textLength="676" lengthAdjust="spacing">CREATIONS</text>
+</svg>

@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/colorpack-logo-dark.svg">
+    <img src="assets/colorpack-logo-light.svg" alt="COLORPACK CREATIONS" width="320">
+  </picture>
+</p>
+
 # Colorpack Backdoor Scan V2.0.1
 
 **[EN]** Single-file PHP backdoor scanner + incident-response console for Joomla and general PHP websites.
